@@ -1,0 +1,63 @@
+# /EnglishTutor/.gitignore
+
+# Ambientes Virtuais Python
+# ----------------------------------
+venv/
+/venv/
+.venv/
+/Lib/
+/Scripts/
+/Include/
+/local/
+/bin/
+*.pyc
+*.pyo
+*.pyd
+__pycache__/
+
+# Arquivos de Ambiente (.env)
+# Contêm segredos e nunca devem ir para o Git!
+# ----------------------------------
+.env
+.env.*
+
+# Dependências do Node.js (caso criadas por engano no backend)
+# ----------------------------------
+node_modules/
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# Logs de pacotes
+# ----------------------------------
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Arquivos de build e distribuição
+# ----------------------------------
+dist/
+dist-ssr/
+build/
+*.egg-info/
+
+# Arquivos de IDE e Sistema Operacional
+# ----------------------------------
+.vscode/
+!.vscode/settings.json
+!.vscode/extensions.json
+!.vscode/launch.json
+.idea/
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Outros
+# ----------------------------------
+*.local
+celerybeat-schedule
