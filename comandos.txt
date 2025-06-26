@@ -1,0 +1,15 @@
+# 1. Inicializa um repositório Git local na sua pasta
+git init -b main
+
+# 2. Adiciona TODOS os arquivos ao "stage", exceto os que estão no .gitignore
+git add .
+
+# 3. Cria o primeiro "commit" (um snapshot do seu projeto)
+git commit -m "Initial commit: Setup backend and frontend structure"
+
+# 4. Conecta seu repositório local ao repositório remoto que você criou no GitHub
+#    (Copie esta linha do seu GitHub, ela terá a sua URL)
+git remote add origin https://github.com/ccerquei2/EnglishTutor.git
+
+# 5. Envia ("push") seu código do computador para o GitHub
+git push -u origin main
