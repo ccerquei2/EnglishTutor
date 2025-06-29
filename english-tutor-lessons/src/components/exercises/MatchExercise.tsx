@@ -4,9 +4,8 @@ import { useState, useEffect, useMemo } from 'react';
 import type { LessonItem } from '@/types/lesson';
 import { Card, CardContent } from '@/components/ui/card';
 import { cn } from "@/lib/utils";
-import { shuffle } from 'lodash'; // Usaremos a função shuffle da biblioteca lodash
+import { shuffle } from 'lodash';
 
-// Definindo o tipo para os pares de pergunta e resposta
 type Pair = { question: string; answer: string };
 
 interface ExerciseProps {
@@ -16,8 +15,6 @@ interface ExerciseProps {
 
 export function MatchExercise({ item, onAnswerSubmit }: ExerciseProps) {
   const { question, pairs }: { question: string, pairs: Pair[] } = item.content;
-
-  // useMemo garante que as respostas sejam embaralhadas apenas uma vez
   const shuffledAnswers = useMemo(() => shuffle(pairs.map(p => p.answer)), [pairs]);
 
   const [selectedQuestion, setSelectedQuestion] = useState<string | null>(null);
@@ -27,49 +24,58 @@ export function MatchExercise({ item, onAnswerSubmit }: ExerciseProps) {
 
   const allMatched = matchedPairs.length === pairs.length;
 
-  // Efeito para verificar se um par foi formado
+  const handleQuestionClick = (q: string) => {
+    if (incorrectAttempt || isButtonDisabled(q, 'question')) return;
+    setSelectedQuestion(prev => (prev === q ? null : q));
+  };
+
+  const handleAnswerClick = (a: string) => {
+    if (incorrectAttempt || isButtonDisabled(a, 'answer')) return;
+    setSelectedAnswer(prev => (prev === a ? null : a));
+  };
+
   useEffect(() => {
     if (selectedQuestion && selectedAnswer) {
       const correctPair = pairs.find(p => p.question === selectedQuestion);
 
-      if (correctPair && correctPair.answer === selectedAnswer) {
-        // Se o par estiver correto
-        setMatchedPairs([...matchedPairs, correctPair]);
+      if (correctPair?.answer === selectedAnswer) {
+        setMatchedPairs(prev => [...prev, correctPair]);
         setSelectedQuestion(null);
         setSelectedAnswer(null);
       } else {
-        // Se o par estiver incorreto, mostra um feedback visual e reseta
         setIncorrectAttempt([selectedQuestion, selectedAnswer]);
         setTimeout(() => {
           setSelectedQuestion(null);
           setSelectedAnswer(null);
           setIncorrectAttempt(null);
-        }, 800); // Reseta após 0.8 segundos
+        }, 800);
       }
     }
-  }, [selectedQuestion, selectedAnswer, pairs, matchedPairs]);
+  }, [selectedQuestion, selectedAnswer, pairs]);
 
-  // Efeito para submeter a resposta quando tudo for combinado
   useEffect(() => {
     if (allMatched) {
-      // A resposta submetida pode ser um simples JSON dos pares
-      onAnswerSubmit(true, JSON.stringify(pairs));
+      // A submissão automática legada continua desativada.
+      console.log("MatchExercise concluído. O progresso será salvo ao finalizar a lição.");
+      // onAnswerSubmit(true, JSON.stringify(pairs));
     }
-  }, [allMatched, onAnswerSubmit, pairs]);
+  }, [allMatched]); // Removidas dependências desnecessárias
 
-  // Funções para obter a classe de estilo dinamicamente
-  const getQuestionClass = (q: string) => {
-    if (matchedPairs.some(p => p.question === q)) return 'bg-green-200 border-green-400';
-    if (selectedQuestion === q) return 'bg-blue-200 border-blue-400';
-    if (incorrectAttempt && incorrectAttempt[0] === q) return 'bg-red-200 border-red-400';
-    return 'bg-slate-100 hover:bg-slate-200';
+  const getButtonClass = (text: string, type: 'question' | 'answer') => {
+    const isMatched = matchedPairs.some(p => p[type] === text);
+    if (isMatched) return 'bg-green-200 border-green-400 text-green-900 opacity-70 cursor-not-allowed';
+
+    const isIncorrect = incorrectAttempt && (incorrectAttempt[0] === text || incorrectAttempt[1] === text);
+    if (isIncorrect) return 'bg-red-200 border-red-400 text-red-900 animate-shake';
+
+    const isSelected = type === 'question' ? selectedQuestion === text : selectedAnswer === text;
+    if (isSelected) return 'bg-blue-200 border-blue-400 ring-2 ring-blue-500';
+
+    return 'bg-slate-100 hover:bg-slate-200 border-slate-300';
   };
 
-  const getAnswerClass = (a: string) => {
-    if (matchedPairs.some(p => p.answer === a)) return 'bg-green-200 border-green-400';
-    if (selectedAnswer === a) return 'bg-blue-200 border-blue-400';
-    if (incorrectAttempt && incorrectAttempt[1] === a) return 'bg-red-200 border-red-400';
-    return 'bg-slate-100 hover:bg-slate-200';
+  const isButtonDisabled = (text: string, type: 'question' | 'answer') => {
+    return allMatched || matchedPairs.some(p => p[type] === text);
   };
 
   return (
@@ -84,28 +90,25 @@ export function MatchExercise({ item, onAnswerSubmit }: ExerciseProps) {
         )}
 
         <div className="grid grid-cols-2 gap-4 mt-4">
-          {/* Coluna de Perguntas */}
           <div className="space-y-2">
             {pairs.map(p => (
               <button
                 key={p.question}
-                onClick={() => !matchedPairs.some(mp => mp.question === p.question) && setSelectedQuestion(p.question)}
-                disabled={allMatched || !!selectedQuestion}
-                className={cn("w-full p-3 text-left rounded-md border-2 transition-colors", getQuestionClass(p.question))}
+                onClick={() => handleQuestionClick(p.question)}
+                disabled={isButtonDisabled(p.question, 'question')}
+                className={cn("w-full p-3 text-left rounded-md border-2 transition-all duration-200", getButtonClass(p.question, 'question'))}
               >
                 {p.question}
               </button>
             ))}
           </div>
-
-          {/* Coluna de Respostas (Embaralhada) */}
           <div className="space-y-2">
             {shuffledAnswers.map(answer => (
               <button
                 key={answer}
-                onClick={() => !matchedPairs.some(mp => mp.answer === answer) && setSelectedAnswer(answer)}
-                disabled={allMatched || !!selectedAnswer}
-                className={cn("w-full p-3 text-left rounded-md border-2 transition-colors", getAnswerClass(answer))}
+                onClick={() => handleAnswerClick(answer)}
+                disabled={isButtonDisabled(answer, 'answer')}
+                className={cn("w-full p-3 text-left rounded-md border-2 transition-all duration-200", getButtonClass(answer, 'answer'))}
               >
                 {answer}
               </button>
