@@ -1,3 +1,5 @@
+#########PRIMEIRA VEZ#########################################
+
 # 1. Inicializa um repositório Git local na sua pasta
 git init -b main
 
@@ -13,4 +15,23 @@ git commit -m "Initial commit: Setup backend and frontend structure"
 git remote add origin https://github.com/ccerquei2/EnglishTutor.git
 
 # 5. Envia ("push") seu código do computador para o GitHub
+git push -u origin main
+
+##############DEMAIS VEZES###################################
+# 1. Navegue até a pasta do seu projeto
+cd "D:\ccerq\Documents\Python\EnglishTutor"
+
+# 2. Inicialize um repositório Git local
+git init -b main
+
+# 3. Adicione todos os arquivos ao stage
+git add .
+
+# 4. Crie o primeiro commit
+git commit -m "Initial commit: Setup backend and frontend structure"
+
+# 5. Conecte ao repositório remoto do GitHub
+git remote set-url origin https://github.com/ccerquei2/EnglishTutor.git
+
+# 6. Envie para o GitHub
 git push -u origin main

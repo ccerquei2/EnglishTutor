@@ -6,7 +6,7 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.output_parsers import StrOutputParser, JsonOutputParser
 from langchain_core.messages import AIMessage, HumanMessage
 from pydantic import BaseModel, Field
-from typing import Literal
+from typing import Literal, List, Optional, Dict, Any, Tuple
 import random
 import json
 
@@ -16,228 +16,196 @@ from .database import (
     get_recently_seen_units, get_learning_units_by_similarity, save_lesson,
     get_learning_unit_by_id, save_performance_record, save_tutor_message,
     save_conversation_turn, get_conversation_history, get_learning_units_by_topic,
-    mark_lesson_units_as_seen
+    mark_lesson_units_as_seen, get_units_by_dependency, get_all_topics_for_level
 )
 
-
-# --- MODELOS E CADEIAS DE IA AUXILIARES ---
+# --- CONSTANTES DE CONFIGURAÇÃO ---
+MINIMUM_UNITS_FOR_LESSON = 4
+RECENTLY_SEEN_DAYS = 14
+WEAKNESS_FOCUS_PROBABILITY = 0.7
 
 class TopicRouter(BaseModel):
     tool_name: Literal["plan_new_lesson", "general_conversation"]
-    topic_tag: str = "general-practice"
-
+    topic_tag: str = Field(default="general-practice", description="O tópico normalizado em inglês ou 'general-practice'.")
 
 def _create_topic_router_chain():
     llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
     parser = JsonOutputParser(pydantic_object=TopicRouter)
-
     prompt_template = ChatPromptTemplate.from_messages([
-        ("system", f"""Você é um assistente de IA que analisa a mensagem de um usuário e a roteia para a ferramenta correta, extraindo uma tag de tópico normalizada.
-        Responda APENAS com um objeto JSON formatado de acordo com o seguinte esquema: {{format_instructions}}
-        Regras para 'topic_tag':
-        - A tag deve ser em inglês, minúscula e com espaços (ex: 'simple present'). NÃO use hífens.
-        - Se nenhum tópico for encontrado, use 'general-practice'.
-        Exemplos:
-        - "Quero praticar Simple Present" -> tool_name: 'plan_new_lesson', topic_tag: 'simple present'
-        - "Olá, tudo bem?" -> tool_name: 'general_conversation', topic_tag: 'general-practice'
-        """),
+        ("system", f"Você é um assistente de IA que analisa a mensagem de um usuário e a roteia para a ferramenta correta, extraindo uma tag de tópico normalizada. Responda APENAS com um objeto JSON formatado de acordo com o seguinte esquema: {{format_instructions}}. Regras para 'topic_tag': - A tag deve ser em inglês, minúscula e com espaços (ex: 'simple present'). NÃO use hífens. - Se nenhum tópico for encontrado, use 'general-practice'."),
         MessagesPlaceholder(variable_name="history"),
         ("human", "Mensagem do usuário: {user_message}")
     ])
-
     prompt_with_instructions = prompt_template.partial(format_instructions=parser.get_format_instructions())
     return prompt_with_instructions | llm | parser
-
 
 def _create_conversational_chain():
     llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.7)
     prompt = ChatPromptTemplate.from_messages([
-        ("system",
-         "You are 'Alex', a friendly English tutor. Respond to the user in Brazilian Portuguese, considering the conversation history. Your main goal is the student's pedagogical progress. Be encouraging and brief."),
+        ("system", "You are 'Alex', a friendly English tutor. Respond to the user in Brazilian Portuguese, considering the conversation history. Your main goal is the student's pedagogical progress. Be encouraging and brief."),
         MessagesPlaceholder(variable_name="history"),
         ("human", "{user_message}")
     ])
     return prompt | llm | StrOutputParser()
 
-
 def _create_semantic_query_chain() -> ChatPromptTemplate:
     llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.2)
     prompt_template = ChatPromptTemplate.from_messages([
-        ("system", """You are an English Curriculum Designer. Create a SINGLE descriptive sentence for a semantic search. Rules:
-        1.  **TOP PRIORITY**: The query must be about the student's request: '{student_request}'.
-        2.  **SECONDARY GOAL**: If the request is generic, THEN focus on weak topics: {weak_topics}.
-        3.  **ABSOLUTE EXCLUSION**: NEVER mention mastered strong topics: {strong_topics}.
-        4.  **OUTPUT**: ONLY the sentence."""),
+        ("system", "You are an English Curriculum Designer. Based on the requested focus, create a SINGLE descriptive sentence for a semantic search. Focus of the lesson: {lesson_focus}. Student's weak topics (for context, not necessarily for focus): {weak_topics}. Student's strong topics (to be avoided if possible): {strong_topics}. OUTPUT: ONLY the sentence for the semantic search."),
         ("human", "Generate the semantic query.")
     ])
     return prompt_template | llm | StrOutputParser()
 
-
-def _select_and_structure_lesson_items(units: list, count: int = 6) -> list:
-    if not units: return []
-    # Garante que não estamos tentando amostrar mais itens do que os disponíveis
-    k = min(len(units), count)
-    return random.sample(units, k)
-
-
-# --- FERRAMENTA DE PLANEJAMENTO DE LIÇÃO (LÓGICA HÍBRIDA) ---
-
-def tool_plan_new_lesson(supabase: Client, user_id: str, topic_tag: str, level: str = "A1") -> dict | None:
-    print("\n\n--- [HYBRID LESSON PLANNER V2] ---")
-
-    performance = get_student_mastery_summary(supabase, user_id)
-    strong_topics_set = set(performance.get('strong_topics', []))
-
-    # Busca inicial de candidatos
-    candidate_units = []
-    lesson_objective = ""
-    is_specific_request = topic_tag != 'general-practice'
-
-    if is_specific_request:
-        print(f"--- [PLANNER] Estratégia 1 (Específica): Buscando por keyword (tag) '{topic_tag}'... ---")
-        candidate_units = get_learning_units_by_topic(supabase, topic_tag, level, count=30)
-        lesson_objective = f"Uma lição focada em: {topic_tag.replace('-', ' ').title()}"
-    else:
-        print(f"--- [PLANNER] Estratégia 2 (Genérica): Usando Busca Semântica... ---")
-        query_chain = _create_semantic_query_chain()
-        semantic_query = query_chain.invoke({
-            "student_request": "a general practice lesson",
-            "weak_topics": ", ".join(performance.get('weak_topics', []) or ["Nenhum"]),
-            "strong_topics": ", ".join(strong_topics_set or ["Nenhum"])
-        })
-        print(f"--- [PLANNER] Query Semântica gerada: '{semantic_query}' ---")
-        embeddings = OpenAIEmbeddings()
-        query_embedding = embeddings.embed_query(semantic_query)
-        candidate_units = get_learning_units_by_similarity(supabase, query_embedding, level, count=50)
-        lesson_objective = semantic_query
-
-    if not candidate_units:
-        print(f"--- [PLANNER] FALHA INICIAL: Nenhum candidato encontrado na busca primária. ---")
-        return None
-
-    print(f"--- [PLANNER] Encontradas {len(candidate_units)} unidades candidatas antes da filtragem. ---")
-
-    # ### CORREÇÃO: LÓGICA DE MÚLTIPLAS TENTATIVAS ###
-    final_candidates = []
-
-    # Tentativa 1: Filtro completo (tópicos fortes + vistos recentemente)
-    print("--- [PLANNER] Tentativa 1: Aplicando todos os filtros (tópicos fortes + vistos recentemente)...")
-    seen_units_ids = get_recently_seen_units(supabase, user_id, days_ago=7)
-    units_after_strong_filter = [u for u in candidate_units if
-                                 not set(u.get('metadata', {}).get('topic', [])).intersection(strong_topics_set)]
-    final_candidates = [u for u in units_after_strong_filter if u.get('id') not in seen_units_ids]
-    print(f"--- [PLANNER] Tentativa 1 resultou em {len(final_candidates)} unidades.")
-
-    # Tentativa 2: Relaxar o filtro de 'vistos recentemente' se a primeira tentativa falhar
-    MINIMUM_UNITS_REQUIRED = 4
-    if len(final_candidates) < MINIMUM_UNITS_REQUIRED:
-        print(f"--- [PLANNER] Poucas unidades. Tentativa 2: Relaxando o filtro de 'vistos recentemente'...")
-        final_candidates = units_after_strong_filter  # Reverte para a lista antes do filtro de 'vistos'
-        print(f"--- [PLANNER] Tentativa 2 resultou em {len(final_candidates)} unidades.")
-
-    lesson_items = _select_and_structure_lesson_items(final_candidates)
-    if not lesson_items:
-        print("--- [PLANNER] FALHA FINAL: Não foi possível montar a lição mesmo após relaxar os filtros. ---")
-        return None
-
-    lesson_title = "Sua Lição Personalizada"
-    lesson_id = save_lesson(supabase, user_id, lesson_title, lesson_objective, lesson_items)
+def _build_and_save_lesson(supabase: Client, user_id: str, title: str, objective: str, items: List[Dict[str, Any]]) -> Optional[Dict]:
+    if not items: return None
+    lesson_id = save_lesson(supabase, user_id, title, objective, items)
     if not lesson_id: return None
+    return {"lesson_id": lesson_id, "title": title, "objective": objective, "lesson_items": items}
 
-    return {"lesson_id": lesson_id, "title": lesson_title, "objective": lesson_objective, "lesson_items": lesson_items}
+def _get_next_focus_topic(performance: dict, all_level_topics: list) -> Tuple[str, str]:
+    weak_topics = performance.get('weak_topics', [])
+    strong_topics = performance.get('strong_topics', [])
+    practiced_topics = set(weak_topics + strong_topics)
+    unpracticed_topics = [t for t in all_level_topics if t not in practiced_topics]
+    if weak_topics and random.random() < WEAKNESS_FOCUS_PROBABILITY:
+        focus = random.choice(weak_topics)
+        print(f"--- [FOCUS DECISION] Estratégia: Foco em Ponto Fraco. Tópico: '{focus}'")
+        return focus, "weakness_focus"
+    if unpracticed_topics:
+        focus = random.choice(unpracticed_topics)
+        print(f"--- [FOCUS DECISION] Estratégia: Descoberta. Tópico novo: '{focus}'")
+        return focus, "discovery"
+    if weak_topics:
+        focus = random.choice(weak_topics)
+        print(f"--- [FOCUS DECISION] Estratégia: Fallback para Ponto Fraco. Tópico: '{focus}'")
+        return focus, "weakness_focus"
+    print("--- [FOCUS DECISION] Estratégia: Revisão Geral.")
+    return "general review of all topics", "general_review"
 
+def _find_semantic_lesson(supabase: Client, user_id: str, level: str, performance: Dict, seen_units_ids: set, all_level_topics: list, exclude_strong_topics: bool, exclude_seen_units: bool) -> Optional[Tuple[List[Dict[str, Any]], str]]:
+    focus_topic, focus_type = _get_next_focus_topic(performance, all_level_topics)
+    strong_topics = performance.get('strong_topics', []) if exclude_strong_topics else []
+    query_chain = _create_semantic_query_chain()
+    semantic_query = query_chain.invoke({"lesson_focus": focus_topic, "weak_topics": ", ".join(performance.get('weak_topics', []) or ["Nenhum"]), "strong_topics": ", ".join(strong_topics or ["Nenhum"])})
+    print(f"--- [PLANNER] Query Semântica gerada: '{semantic_query}' ---")
+    embeddings = OpenAIEmbeddings()
+    query_embedding = embeddings.embed_query(semantic_query)
+    candidate_units = get_learning_units_by_similarity(supabase, query_embedding, level, count=50)
+    if exclude_strong_topics:
+        candidate_units = [u for u in candidate_units if not set(u.get('metadata', {}).get('topic', [])).intersection(set(strong_topics))]
+    if exclude_seen_units:
+        candidate_units = [u for u in candidate_units if u.get('id') not in seen_units_ids]
+    if len(candidate_units) >= MINIMUM_UNITS_FOR_LESSON:
+        k = min(len(candidate_units), 6)
+        return random.sample(candidate_units, k), semantic_query
+    return None, None
 
-def tool_generate_proactive_feedback(supabase: Client, user_id: str):
+def tool_plan_new_lesson(supabase: Client, user_id: str, topic_tag: str, level: str = "A1") -> Optional[Dict]:
+    print(f"\n--- [DYNAMIC FUNNEL PLANNER V5.0] --- Tópico: '{topic_tag}' ---")
     performance = get_student_mastery_summary(supabase, user_id)
-    if not performance.get('weak_topics') and not performance.get('strong_topics'):
-        return
-    # Resto da função
-    pass
+    seen_units_ids = get_recently_seen_units(supabase, user_id, days_ago=RECENTLY_SEEN_DAYS)
+    if topic_tag != 'general-practice':
+        print(f"--- [PLANNER] Tentativa 1 (Específica): Buscando Âncora para '{topic_tag}'...")
+        anchor_types = ["read_and_answer", "dialogue"]
+        anchors = get_learning_units_by_topic(supabase, topic_tag, level, anchor_types, count=10)
+        valid_anchors = [u for u in anchors if u.get('id') not in seen_units_ids]
+        if valid_anchors:
+            anchor = random.choice(valid_anchors)
+            dependencies = get_units_by_dependency(supabase, anchor['id'], level)
+            lesson_items = [anchor] + dependencies
+            if len(lesson_items) >= MINIMUM_UNITS_FOR_LESSON:
+                title = anchor.get('content', {}).get('title', f"Lição sobre {topic_tag.title()}")
+                objective = f"Praticar '{topic_tag.title()}' com base em um texto de exemplo."
+                print(f"--- [PLANNER] SUCESSO! Lição contextual encontrada com {len(lesson_items)} itens.")
+                return _build_and_save_lesson(supabase, user_id, title, objective, lesson_items)
+        print(f"--- [PLANNER] Tentativa 2 (Específica): Buscando exercícios para '{topic_tag}'...")
+        exercise_types = ["exercise", "grammar_rule", "review_exercise"]
+        exercises = get_learning_units_by_topic(supabase, topic_tag, level, exercise_types, count=20)
+        valid_exercises = [u for u in exercises if u.get('id') not in seen_units_ids]
+        if len(valid_exercises) >= MINIMUM_UNITS_FOR_LESSON:
+            k = min(len(valid_exercises), 5)
+            lesson_items = random.sample(valid_exercises, k)
+            title = f"Exercícios de {topic_tag.title()}"
+            objective = f"Uma série de exercícios para reforçar seu conhecimento sobre {topic_tag}."
+            print(f"--- [PLANNER] SUCESSO! Lição de exercícios focados encontrada com {len(lesson_items)} itens.")
+            return _build_and_save_lesson(supabase, user_id, title, objective, lesson_items)
 
+    print("--- [PLANNER] Iniciando funil de lição geral...")
+    all_level_topics = get_all_topics_for_level(supabase, level)
+    print("--- [PLANNER] Tentativa 1 (Geral): Busca Dinâmica Ideal (filtros: strong_topics, seen_units)...")
+    lesson_items, objective = _find_semantic_lesson(supabase, user_id, level, performance, seen_units_ids, all_level_topics, exclude_strong_topics=True, exclude_seen_units=True)
+    if lesson_items:
+        print(f"--- [PLANNER] SUCESSO! Lição de revisão ideal encontrada com {len(lesson_items)} itens.")
+        return _build_and_save_lesson(supabase, user_id, "Sua Lição de Revisão Inteligente", objective, lesson_items)
+    print("--- [PLANNER] Tentativa 2 (Geral): Busca Dinâmica Confiável (filtro: seen_units)...")
+    lesson_items, objective = _find_semantic_lesson(supabase, user_id, level, performance, seen_units_ids, all_level_topics, exclude_strong_topics=False, exclude_seen_units=True)
+    if lesson_items:
+        print(f"--- [PLANNER] SUCESSO! Lição de revisão confiável encontrada com {len(lesson_items)} itens.")
+        return _build_and_save_lesson(supabase, user_id, "Sua Lição de Revisão", objective, lesson_items)
+    print("--- [PLANNER] Tentativa 3 (Geral): Busca Dinâmica 'Não Falha' (sem filtros)...")
+    lesson_items, objective = _find_semantic_lesson(supabase, user_id, level, performance, seen_units_ids, all_level_topics, exclude_strong_topics=False, exclude_seen_units=False)
+    if lesson_items:
+        print(f"--- [PLANNER] SUCESSO! Lição 'Não Falha' encontrada com {len(lesson_items)} itens.")
+        return _build_and_save_lesson(supabase, user_id, "Sua Nova Lição", objective, lesson_items)
+    print("--- [PLANNER] FALHA CRÍTICA: Não foi possível montar nenhuma lição.")
+    return None
 
-# --- O CÉREBRO: TUTOR ORQUESTRADOR ---
 def tutor_orchestrator(supabase: Client, user_id: str, intent: UserIntent) -> AIResponse:
     if intent.type == 'button_click':
         action = intent.action_id
         if action == 'generate_new_lesson':
             active_lesson_data = get_active_lesson(supabase, user_id)
             if active_lesson_data:
-                return AIResponse(response_type='active_lesson_returned',
-                                  message_to_user="Você já tem uma lição em andamento.",
-                                  content=Lesson(**active_lesson_data))
+                return AIResponse(response_type='active_lesson_returned', message_to_user="Você já tem uma lição em andamento.", content=Lesson(**active_lesson_data))
             new_lesson_data = tool_plan_new_lesson(supabase, user_id=user_id, topic_tag='general-practice')
             if not new_lesson_data:
-                return AIResponse(response_type='error',
-                                  message_to_user="Desculpe, não consegui criar uma nova lição agora.")
-            return AIResponse(response_type='new_lesson', message_to_user="Aqui está sua nova lição personalizada!",
-                              content=Lesson(**new_lesson_data))
-
+                return AIResponse(response_type='error', message_to_user="Desculpe, não consegui criar uma nova lição agora. Tente novamente em alguns instantes.")
+            return AIResponse(response_type='new_lesson', message_to_user="Aqui está sua nova lição personalizada!", content=Lesson(**new_lesson_data))
         elif action == 'complete_current_lesson':
             lesson_id = intent.metadata.get('lesson_id') if intent.metadata else None
-            if not lesson_id:
-                return AIResponse(response_type='error',
-                                  message_to_user="Não foi possível identificar qual lição completar.")
+            if not lesson_id: return AIResponse(response_type='error', message_to_user="Não foi possível identificar qual lição completar.")
             update_lesson_status(supabase, lesson_id, "completed")
             mark_lesson_units_as_seen(supabase, user_id, lesson_id)
-            tool_generate_proactive_feedback(supabase, user_id)
             return AIResponse(response_type='tutor_feedback', message_to_user="Ótimo trabalho ao completar a lição!")
-
     elif intent.type == 'chat_message' and intent.text:
         save_conversation_turn(supabase, user_id, 'user', intent.text)
         history_raw = get_conversation_history(supabase, user_id)
-        history_langchain = [
-            HumanMessage(content=h['content']) if h['role'] == 'user' else AIMessage(content=h['content']) for h in
-            history_raw]
-
+        history_langchain = [HumanMessage(content=h['content']) if h['role'] == 'user' else AIMessage(content=h['content']) for h in history_raw]
         router_chain = _create_topic_router_chain()
         router_result = router_chain.invoke({"user_message": intent.text, "history": history_langchain})
-
         if router_result['tool_name'] == "plan_new_lesson":
             active_lesson_data = get_active_lesson(supabase, user_id)
             if active_lesson_data:
-                response = AIResponse(response_type='active_lesson_returned',
-                                      message_to_user="Boa ideia! Mas primeiro, vamos terminar a lição que já está em andamento.",
-                                      content=Lesson(**active_lesson_data))
+                response = AIResponse(response_type='active_lesson_returned', message_to_user="Boa ideia! Mas primeiro, vamos terminar a lição que já está em andamento.", content=Lesson(**active_lesson_data))
             else:
                 topic_tag = router_result['topic_tag']
                 new_lesson_data = tool_plan_new_lesson(supabase, user_id=user_id, topic_tag=topic_tag)
-
                 if not new_lesson_data:
-                    if topic_tag != 'general-practice':
-                        message = f"Ótimo pedido! No momento, não encontrei exercícios sobre '{topic_tag}' para o seu nível (A1). Que tal praticarmos outro tópico?"
-                    else:
-                        message = "Puxa, parece que não consegui montar uma lição de revisão geral agora. Tente novamente em alguns instantes."
+                    message = f"Ótimo pedido! No momento, não consegui montar uma lição sobre '{topic_tag.title()}'. Que tal praticarmos outro tópico ou uma revisão geral?"
                     response = AIResponse(response_type='tutor_feedback', message_to_user=message)
                 else:
-                    response = AIResponse(
-                        response_type='new_lesson',
-                        message_to_user="Ótimo! Preparei uma lição especial para você sobre esse tópico.",
-                        content=Lesson(**new_lesson_data)
-                    )
+                    response = AIResponse(response_type='new_lesson', message_to_user=f"Ótimo! Preparei uma lição especial para você sobre {topic_tag.title()}.", content=Lesson(**new_lesson_data))
             save_conversation_turn(supabase, user_id, 'ai', response.message_to_user)
             return response
-
         elif router_result['tool_name'] == "general_conversation":
             conv_chain = _create_conversational_chain()
             response_text = conv_chain.invoke({"user_message": intent.text, "history": history_langchain})
             response = AIResponse(response_type='tutor_feedback', message_to_user=response_text)
             save_conversation_turn(supabase, user_id, 'ai', response.message_to_user)
             return response
-
     return AIResponse(response_type='error', message_to_user="Não entendi sua solicitação.")
 
-
-def original_process_student_answer(supabase: Client, user_id: str, lesson_id: str, unit_id: str,
-                                    student_response: str):
-    print(f"--- [LEGACY ANSWER] Processando resposta para a unidade: {unit_id} ---")
+def original_process_student_answer(supabase: Client, user_id: str, lesson_id: str, unit_id: str, student_response: str):
+    print(f"--- [ANSWER PROCESSOR] Processando resposta para a unidade: {unit_id} ---")
     unit = get_learning_unit_by_id(supabase, unit_id)
     if not unit:
-        print(f"!!! ERRO CRÍTICO: Unidade de aprendizado com ID '{unit_id}' NÃO ENCONTRADA no banco de dados. !!!")
         return {"error": f"Unidade de aprendizado '{unit_id}' não encontrada."}
-    correct_answer = unit.get("content", {}).get("correct_answer")
-    if not correct_answer:
-        return {"error": "Exercício sem resposta correta definida."}
+    content = unit.get("content", {})
+    correct_answer = content.get("correct_answer")
+    if correct_answer is None:
+        save_performance_record(supabase, user_id, lesson_id, unit_id, True, {"answer": student_response, "note": "Assumed correct from client."})
+        return {"is_correct": True, "correct_answer": student_response, "feedback": content.get("feedback", {})}
     is_correct = student_response.strip().lower() == str(correct_answer).strip().lower()
-    feedback_obj = unit.get("content", {}).get("feedback", {})
+    feedback_obj = content.get("feedback", {})
     save_performance_record(supabase, user_id, lesson_id, unit_id, is_correct, {"answer": student_response})
     return {"is_correct": is_correct, "correct_answer": correct_answer, "feedback": feedback_obj}
